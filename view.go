@@ -116,7 +116,7 @@ func (m model) footerBarCentered(help string) string {
 }
 
 // repoModule is the path users run `go install <path>@latest` to update.
-const repoModule = "github.com/renatoworks/oh-my-reddit"
+const repoModule = "github.com/n3evin/oh-my-reddit"
 
 // updateNotice renders the "a newer version is available" line, centered across
 // the full width, or "" when no newer release is known (the background check

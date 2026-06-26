@@ -56,6 +56,9 @@ func (m model) renderList() string {
 		lipgloss.JoinVertical(lipgloss.Left, wordmark(), head, "", m.renderSortTabs(), "", listArea),
 	)
 	footer := m.footerBarCentered(m.signedInChip() + metaStyle.Render("↑/↓ move · ←/→ sort · enter open · / filter · esc back · ctrl+c quit"))
+	if m.listHasMore && m.filter == "" {
+		footer = m.footerBarCentered(m.signedInChip() + metaStyle.Render("↑/↓ move · ↓ load more · ←/→ sort · enter open · / filter · esc back · ctrl+c quit"))
+	}
 	return m.centerPage(block, footer)
 }
 
@@ -146,6 +149,12 @@ func (m model) renderThreadList() string {
 	}
 	if end < len(results) {
 		lines = append(lines, metaStyle.Render("  ↓ "+strconv.Itoa(len(results)-end)+" more"))
+	}
+	if m.listLoadingMore {
+		frame := spinner.Dot.Frames[m.tick%len(spinner.Dot.Frames)]
+		lines = append(lines, lipgloss.NewStyle().Foreground(colAccent).Render("  "+frame+" loading more…"))
+	} else if m.listHasMore && m.filter == "" {
+		lines = append(lines, metaStyle.Render("  ↓ load more"))
 	}
 	return strings.Join(lines, "\n")
 }

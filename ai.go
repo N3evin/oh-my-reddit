@@ -105,7 +105,7 @@ func threadCorpus(sub, title, opBody string, bodies []string) string {
 		b.WriteString(op)
 		b.WriteString("\n")
 	}
-	b.WriteString("\nRecent comments (oldest first):\n")
+	b.WriteString("\nRecent comments (newest first):\n")
 	for _, body := range bodies {
 		body = strings.TrimSpace(body)
 		if len(body) > 400 {

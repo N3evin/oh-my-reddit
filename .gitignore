@@ -1,5 +1,6 @@
 # Compiled binary
 /oh-my-reddit
+*.exe
 
 # Secrets: your OpenAI key (the Reddit session is handled in-app). NEVER commit this.
 .env

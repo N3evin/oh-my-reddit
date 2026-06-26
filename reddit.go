@@ -222,6 +222,59 @@ func retryAfter(h string) time.Duration {
 	return 0
 }
 
+// postForm POSTs form-encoded data with the same retry/backoff as fetchBytes.
+func postForm(rawURL string, form url.Values) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		if attempt > 0 {
+			time.Sleep(backoff(attempt))
+		}
+		req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", browserUA)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+		if cookie := currentCookie(); cookie != "" {
+			req.Header.Set("Cookie", cookie)
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		switch {
+		case resp.StatusCode == http.StatusOK:
+			if readErr != nil {
+				return nil, readErr
+			}
+			return body, nil
+		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+			if d := retryAfter(resp.Header.Get("Retry-After")); d > 0 {
+				time.Sleep(d)
+			}
+			lastErr = fmt.Errorf("reddit busy (%s)", resp.Status)
+			continue
+		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
+			if changed, _ := renewCookie(); changed {
+				continue
+			}
+			return nil, errAuth
+		case resp.StatusCode == http.StatusNotFound:
+			return nil, errNotFound
+		default:
+			return nil, fmt.Errorf("reddit returned %s", resp.Status)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("request failed")
+	}
+	return nil, lastErr
+}
+
 // --- public API ------------------------------------------------------------
 
 func cleanSubreddit(s string) string {
@@ -247,6 +300,7 @@ func rssURL(raw string) string {
 // exposes stickied posts and comment counts.
 type jsonListing struct {
 	Data struct {
+		After    string `json:"after"` // pagination cursor; empty when done
 		Children []struct {
 			Data struct {
 				ID          string `json:"id"`
@@ -258,6 +312,12 @@ type jsonListing struct {
 			} `json:"data"`
 		} `json:"children"`
 	} `json:"data"`
+}
+
+// threadsResult is one page of a subreddit listing plus the cursor for the next.
+type threadsResult struct {
+	threads []thread
+	after   string
 }
 
 // errNotFound is a 404 from reddit, surfaced so callers can show a friendly,
@@ -286,41 +346,56 @@ var listSorts = []listSort{sortHot, sortNew, sortRising, sortTop}
 
 // fetchThreads lists a subreddit's posts in the given sort order. It prefers
 // JSON (pins + comment counts) and falls back to RSS when JSON is blocked.
-func fetchThreads(subreddit string, sort listSort) ([]thread, error) {
+func fetchThreads(subreddit string, sort listSort) (threadsResult, error) {
 	sub := cleanSubreddit(subreddit)
-	if ts, err := fetchThreadsJSON(sub, sort); err == nil && len(ts) > 0 {
-		return ts, nil
+	if page, err := fetchThreadsJSON(sub, sort, ""); err == nil && len(page.threads) > 0 {
+		return page, nil
 	}
 	ts, err := fetchThreadsRSS(sub, sort)
 	if errors.Is(err, errNotFound) {
-		return nil, fmt.Errorf("no subreddit called r/%s", sub)
+		return threadsResult{}, fmt.Errorf("no subreddit called r/%s", sub)
 	}
-	return ts, err
+	return threadsResult{threads: ts}, err
+}
+
+// fetchThreadsPage loads the next page of a subreddit listing using Reddit's
+// "after" cursor. JSON only — RSS has no pagination.
+func fetchThreadsPage(subreddit string, sort listSort, after string) (threadsResult, error) {
+	sub := cleanSubreddit(subreddit)
+	return fetchThreadsJSON(sub, sort, after)
 }
 
 // threadsJSONURL builds a subreddit listing endpoint for the given sort. "top"
 // needs a time window; we default to the day so it tracks what's big right now.
-func threadsJSONURL(sub string, sort listSort) string {
+func threadsJSONURL(sub string, sort listSort, after string) string {
 	u := "https://www.reddit.com/r/" + sub + "/" + string(sort) + ".json?limit=100&raw_json=1"
 	if sort == sortTop {
 		u += "&t=day"
 	}
+	if after != "" {
+		u += "&after=" + url.QueryEscape(after)
+	}
 	return u
 }
 
-func fetchThreadsJSON(sub string, sort listSort) ([]thread, error) {
-	body, err := fetchBytes(threadsJSONURL(sub, sort))
+func fetchThreadsJSON(sub string, sort listSort, after string) (threadsResult, error) {
+	body, err := fetchBytes(threadsJSONURL(sub, sort, after))
 	if err != nil {
-		return nil, err
+		return threadsResult{}, err
 	}
-	return parseThreadsJSON(body)
+	ts, next, err := parseThreadsJSON(body, after == "")
+	if err != nil {
+		return threadsResult{}, err
+	}
+	return threadsResult{threads: ts, after: next}, nil
 }
 
-// parseThreadsJSON turns a subreddit listing into threads, stickies first.
-func parseThreadsJSON(body []byte) ([]thread, error) {
+// parseThreadsJSON turns a subreddit listing into threads. On the first page
+// (pinStickies), stickied posts float to the top; later pages keep Reddit order.
+func parseThreadsJSON(body []byte, pinStickies bool) ([]thread, string, error) {
 	var l jsonListing
 	if err := json.Unmarshal(body, &l); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]thread, 0, len(l.Data.Children))
 	for _, c := range l.Data.Children {
@@ -335,12 +410,12 @@ func parseThreadsJSON(body []byte) ([]thread, error) {
 		})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("empty listing")
+		return nil, "", fmt.Errorf("empty listing")
 	}
-	// Pin stickied threads to the top, otherwise keep Reddit's order for the
-	// requested sort.
-	sort.SliceStable(out, func(i, j int) bool { return out[i].stickied && !out[j].stickied })
-	return out, nil
+	if pinStickies {
+		sort.SliceStable(out, func(i, j int) bool { return out[i].stickied && !out[j].stickied })
+	}
+	return out, l.Data.After, nil
 }
 
 // threadsRSSURL builds the Atom feed for a subreddit listing. Hot is the bare
@@ -386,7 +461,8 @@ func fetchThreadsRSS(sub string, sort listSort) ([]thread, error) {
 }
 
 // jsonComment models a node in the comment tree. Replies is "" (string) when
-// empty, or a nested listing object — hence RawMessage.
+// empty, or a nested listing object — hence RawMessage. "more" stubs carry
+// child IDs to expand via /api/morechildren.
 type jsonComment struct {
 	Kind string `json:"kind"`
 	Data struct {
@@ -397,6 +473,7 @@ type jsonComment struct {
 		CreatedUTC float64         `json:"created_utc"`
 		ParentID   string          `json:"parent_id"`
 		Replies    json.RawMessage `json:"replies"`
+		Children   []string        `json:"children"` // "more" stub: comment IDs to fetch
 	} `json:"data"`
 }
 
@@ -412,6 +489,7 @@ type jsonPostListing struct {
 	Data struct {
 		Children []struct {
 			Data struct {
+				ID         string  `json:"id"`
 				Title      string  `json:"title"`
 				Author     string  `json:"author"`
 				Selftext   string  `json:"selftext"`
@@ -513,9 +591,10 @@ func isEmojiCluster(runes []rune) bool {
 	return false
 }
 
-// jsonURL builds the .json endpoint for a thread. sort=new puts the freshest
-// comments last so the live feed streams the newest edge; limit=200 caps the
-// fetch so a huge thread stays cheap.
+const commentFetchLimit = 100
+
+// jsonURL builds the .json endpoint for a thread. sort=new returns the freshest
+// comments first; limit caps each fetch so huge threads stay cheap.
 func jsonURL(raw string) string {
 	path := strings.TrimSpace(raw)
 	if u, err := url.Parse(path); err == nil && u.Host != "" {
@@ -525,7 +604,7 @@ func jsonURL(raw string) string {
 	path = strings.TrimSuffix(path, ".json")
 	path = strings.TrimSuffix(path, ".rss")
 	path = strings.TrimSuffix(path, "/")
-	return "https://www.reddit.com" + path + ".json?sort=new&limit=200&raw_json=1"
+	return fmt.Sprintf("https://www.reddit.com%s.json?sort=new&limit=%d&raw_json=1", path, commentFetchLimit)
 }
 
 // fetchUsernameFor returns the reddit username for a given Cookie header (via
@@ -571,64 +650,152 @@ func fetchUsernameFor(cookie string) (name string, reached bool) {
 // fetchUsername resolves the username for the currently-active cookie.
 func fetchUsername() (string, bool) { return fetchUsernameFor(currentCookie()) }
 
+// threadComments is the parsed result of a thread fetch, including pagination hints.
+type threadComments struct {
+	post     *post
+	comments []comment
+	postID   string   // "t3_…" for morechildren
+	moreIDs  []string // child IDs from "more" stubs
+}
+
 // fetchComments pulls a thread's OP and comments, preferring JSON (score +
 // parent_id for threading, plus the OP submission) and falling back to RSS when
 // JSON is blocked. The post is nil on the RSS path (RSS carries no OP body).
-func fetchComments(threadRef string) (*post, []comment, error) {
-	if p, cs, err := fetchCommentsJSON(threadRef); err == nil && len(cs) > 0 {
-		return p, cs, nil
+func fetchComments(threadRef string) (threadComments, error) {
+	if tc, err := fetchCommentsJSON(threadRef); err == nil && len(tc.comments) > 0 {
+		return tc, nil
 	}
 	cs, err := fetchCommentsRSS(threadRef)
 	if errors.Is(err, errNotFound) {
-		return nil, nil, fmt.Errorf("that thread isn't on reddit anymore (it may have been deleted)")
+		return threadComments{}, fmt.Errorf("that thread isn't on reddit anymore (it may have been deleted)")
 	}
-	return nil, cs, err
+	return threadComments{comments: cs}, err
 }
 
-func fetchCommentsJSON(threadRef string) (*post, []comment, error) {
+func fetchCommentsJSON(threadRef string) (threadComments, error) {
 	body, err := fetchBytes(jsonURL(threadRef))
 	if err != nil {
-		return nil, nil, err
+		return threadComments{}, err
 	}
 	return parseThreadJSON(body)
 }
 
+const moreChildrenBatch = 20
+
+// fetchMoreComments expands a batch of "more" stub child IDs via Reddit's
+// morechildren endpoint. fetched lists the child IDs consumed; nestedMore carries
+// any new "more" stubs returned in the response.
+func fetchMoreComments(postID string, moreIDs []string) (comments []comment, remaining, fetched, nestedMore []string, err error) {
+	if postID == "" || len(moreIDs) == 0 {
+		return nil, moreIDs, nil, nil, nil
+	}
+	batch := moreIDs
+	if len(batch) > moreChildrenBatch {
+		batch = batch[:moreChildrenBatch]
+	}
+	remaining = moreIDs[len(batch):]
+	fetched = append([]string(nil), batch...)
+
+	form := url.Values{
+		"link_id":  {postID},
+		"children": {strings.Join(batch, ",")},
+		"sort":     {"new"},
+		"api_type": {"json"},
+	}
+	body, err := postForm("https://www.reddit.com/api/morechildren.json", form)
+	if err != nil {
+		return nil, moreIDs, nil, nil, err
+	}
+	comments, nestedMore, err = parseMoreChildrenJSON(body)
+	if err != nil {
+		return nil, moreIDs, nil, nil, err
+	}
+	sortCommentsNewestFirst(comments)
+	return comments, remaining, fetched, nestedMore, nil
+}
+
+// parseMoreChildrenJSON extracts comments and nested "more" child IDs from a
+// morechildren API response.
+func parseMoreChildrenJSON(body []byte) ([]comment, []string, error) {
+	var resp struct {
+		JSON struct {
+			Data struct {
+				Things []jsonComment `json:"things"`
+			} `json:"data"`
+		} `json:"json"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, nil, err
+	}
+	var out []comment
+	var nested []string
+	for _, c := range resp.JSON.Data.Things {
+		if c.Kind == "more" {
+			nested = append(nested, c.Data.Children...)
+			continue
+		}
+		if c.Kind != "t1" {
+			continue
+		}
+		if cm := commentFromJSON(c); cm != nil {
+			out = append(out, *cm)
+		}
+	}
+	return out, nested, nil
+}
+
+func commentFromJSON(c jsonComment) *comment {
+	b := stripControl(strings.TrimSpace(c.Data.Body))
+	if b == "" || b == "[deleted]" || b == "[removed]" {
+		return nil
+	}
+	return &comment{
+		id:       "t1_" + c.Data.ID,
+		author:   stripControl(c.Data.Author),
+		body:     b,
+		score:    c.Data.Score,
+		hasScore: true,
+		parentID: c.Data.ParentID,
+		postedAt: time.Unix(int64(c.Data.CreatedUTC), 0),
+	}
+}
+
+func sortCommentsNewestFirst(cs []comment) {
+	sort.Slice(cs, func(i, j int) bool { return cs[i].postedAt.After(cs[j].postedAt) })
+}
+
 // parseThreadJSON turns a thread response into its OP (listings[0]) and comments
-// (listings[1]), walking the reply tree oldest-first and dropping deleted nodes.
-func parseThreadJSON(body []byte) (*post, []comment, error) {
+// (listings[1]), walking the reply tree and collecting "more" stubs for pagination.
+func parseThreadJSON(body []byte) (threadComments, error) {
 	var listings []json.RawMessage
 	if err := json.Unmarshal(body, &listings); err != nil {
-		return nil, nil, err
+		return threadComments{}, err
 	}
 	if len(listings) < 2 {
-		return nil, nil, fmt.Errorf("unexpected response shape")
+		return threadComments{}, fmt.Errorf("unexpected response shape")
 	}
 	op := parsePost(listings[0])
+	postID := postIDFromListing(listings[0])
 	var cl jsonCommentListing
 	if err := json.Unmarshal(listings[1], &cl); err != nil {
-		return nil, nil, err
+		return threadComments{}, err
 	}
 
 	var out []comment
+	var moreIDs []string
 	var walk func(children []jsonComment)
 	walk = func(children []jsonComment) {
 		for _, c := range children {
+			if c.Kind == "more" {
+				moreIDs = append(moreIDs, c.Data.Children...)
+				continue
+			}
 			if c.Kind != "t1" {
-				continue // skip "more" stubs
+				continue
 			}
-			b := stripControl(strings.TrimSpace(c.Data.Body))
-			if b != "" && b != "[deleted]" && b != "[removed]" {
-				out = append(out, comment{
-					id:       "t1_" + c.Data.ID,
-					author:   stripControl(c.Data.Author),
-					body:     b,
-					score:    c.Data.Score,
-					hasScore: true,
-					parentID: c.Data.ParentID,
-					postedAt: time.Unix(int64(c.Data.CreatedUTC), 0),
-				})
+			if cm := commentFromJSON(c); cm != nil {
+				out = append(out, *cm)
 			}
-			// Recurse into nested replies (Replies is "" when there are none).
 			if len(c.Data.Replies) > 0 && c.Data.Replies[0] == '{' {
 				var rep jsonCommentListing
 				if json.Unmarshal(c.Data.Replies, &rep) == nil {
@@ -639,8 +806,21 @@ func parseThreadJSON(body []byte) (*post, []comment, error) {
 	}
 	walk(cl.Data.Children)
 
-	sort.Slice(out, func(i, j int) bool { return out[i].postedAt.Before(out[j].postedAt) })
-	return op, out, nil
+	sortCommentsNewestFirst(out)
+	return threadComments{post: op, comments: out, postID: postID, moreIDs: moreIDs}, nil
+}
+
+// postIDFromListing extracts the t3_ fullname from listings[0].
+func postIDFromListing(raw json.RawMessage) string {
+	var pl jsonPostListing
+	if json.Unmarshal(raw, &pl) != nil || len(pl.Data.Children) == 0 {
+		return ""
+	}
+	id := pl.Data.Children[0].Data.ID
+	if id == "" {
+		return ""
+	}
+	return "t3_" + id
 }
 
 // fetchCommentsRSS pulls a thread's comments via RSS, oldest-first.
@@ -672,8 +852,8 @@ func fetchCommentsRSS(threadRef string) ([]comment, error) {
 		})
 	}
 
-	// RSS order isn't guaranteed; sort oldest-first for appending.
-	sort.Slice(out, func(i, j int) bool { return out[i].postedAt.Before(out[j].postedAt) })
+	// RSS order isn't guaranteed; sort newest-first for display.
+	sortCommentsNewestFirst(out)
 	return out, nil
 }
 
