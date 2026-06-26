@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +33,14 @@ func (m *model) startFeed(url, title, sub string, live bool) {
 	m.seen = map[string]bool{}
 	m.byName = map[string]comment{}
 	m.scores = map[string]int{}
+	m.postID = ""
+	m.commentMoreIDs = nil
+	m.fetchedMoreIDs = map[string]bool{}
+	m.commentsHasMore = false
+	m.commentsLoadingMore = false
+	m.olderLoadedTotal = 0
+	m.lastLoadFlash = 0
+	m.lastLoadAt = time.Time{}
 	m.demoIndex = 0
 	m.demoBeat = 0
 	m.updatedAt = time.Time{}
@@ -71,36 +80,37 @@ func (m model) feedCmds() tea.Cmd {
 }
 
 // setFeedQuery updates the in-thread filter and repaints, scrolling to the
-// bottom so the newest matches stay in view.
+// top so the newest matches stay in view.
 func (m *model) setFeedQuery(q string) {
 	m.feedQuery = q
 	m.refreshFeed()
-	m.vp.GotoBottom()
+	m.vp.GotoTop()
 }
 
-// appendAICard appends a synthesized AI card (sentiment or answer), anchors the
+// appendAICard prepends a synthesized AI card (sentiment or answer), anchors the
 // speaking band on it, scrolls to it, and returns the cmd that reads it aloud
 // then resumes narration. summaryMsg and answerMsg differ only by header text.
 func (m *model) appendAICard(header, text string) tea.Cmd {
 	m.summarizing = false
 	now := time.Now()
 	id := fmt.Sprintf("ai-%d", now.UnixNano())
-	m.comments = append(m.comments, comment{
+	card := comment{
 		id:        id,
 		isSummary: true,
 		aiHeader:  header,
 		body:      text,
 		postedAt:  now,
 		shownAt:   now,
-	})
+	}
+	m.comments = append([]comment{card}, m.comments...)
 	m.startSpeaking(id, now)
 	m.refreshFeed()
-	m.vp.GotoBottom()
+	m.vp.GotoTop()
 	return m.aiSpeakCmd(text)
 }
 
-// enqueue adds only unseen comments to the pending queue. The first batch is
-// capped so launch fills quickly rather than trickling for minutes.
+// enqueue adds only unseen comments to the pending queue (newest-first). The
+// first batch is capped so launch fills quickly rather than trickling for minutes.
 func (m *model) enqueue(cs []comment) {
 	fresh := make([]comment, 0, len(cs))
 	for _, c := range cs {
@@ -108,19 +118,165 @@ func (m *model) enqueue(cs []comment) {
 		if c.hasScore {
 			m.scores[c.id] = c.score // refresh score live, even for already-shown comments
 		}
-		if m.seen[c.id] {
+		if m.seen[c.id] || m.pendingHas(c.id) {
 			continue
 		}
-		m.seen[c.id] = true
 		fresh = append(fresh, c)
 	}
-	if len(m.comments) == 0 && len(m.pending) == 0 && len(fresh) > initialCap {
-		fresh = fresh[len(fresh)-initialCap:]
+	if len(fresh) == 0 {
+		return
+	}
+	sortCommentsNewestFirst(fresh)
+	wasEmpty := len(m.comments) == 0 && len(m.pending) == 0
+	if wasEmpty && len(fresh) > initialCap {
+		fresh = fresh[:initialCap]
 	}
 	m.pending = append(m.pending, fresh...)
+	sortCommentsNewestFirst(m.pending)
+	if wasEmpty {
+		m.flushInstantBurst()
+	}
 }
 
-// releaseOne moves a single pending comment into the visible feed.
+// flushInstantBurst releases the newest instantBurst comments at once so the
+// feed opens on fresh content; remaining pending trickles in below.
+func (m *model) flushInstantBurst() {
+	n := instantBurst
+	if n > len(m.pending) {
+		n = len(m.pending)
+	}
+	if n == 0 {
+		return
+	}
+	now := time.Now()
+	burst := make([]comment, n)
+	copy(burst, m.pending[:n])
+	m.pending = m.pending[n:]
+	for i := range burst {
+		burst[i].shownAt = now
+	}
+	m.mergeCommentsSorted(burst, anchorPrepend)
+	m.updatedAt = now
+	if m.ready {
+		m.vp.GotoTop()
+	}
+}
+
+// appendOlderComments merges paginated comments into the feed in newest-first
+// order by postedAt. Returns how many new comments were added.
+func (m *model) appendOlderComments(cs []comment) int {
+	return m.mergeCommentsSorted(cs, anchorKeep)
+}
+
+// insertIndexNewestFirst returns where c belongs in a newest-first feed.
+func insertIndexNewestFirst(comments []comment, c comment) int {
+	for i := range comments {
+		if c.postedAt.After(comments[i].postedAt) {
+			return i
+		}
+	}
+	return len(comments)
+}
+
+func (m model) pendingHas(id string) bool {
+	for _, c := range m.pending {
+		if c.id == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (m model) commentInFeed(id string) bool {
+	for _, c := range m.comments {
+		if c.id == id {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeCommentsSorted inserts comments by postedAt (newest first), skipping
+// duplicates already in the visible feed.
+func (m *model) mergeCommentsSorted(fresh []comment, anchor scrollAnchor) int {
+	if len(fresh) == 0 {
+		return 0
+	}
+	sortCommentsNewestFirst(fresh)
+	yOff := m.vp.YOffset
+	wasTop := m.ready && yOff == 0
+	insertedAtTop := false
+	added := 0
+	for _, c := range fresh {
+		if m.commentInFeed(c.id) {
+			continue
+		}
+		m.byName[c.id] = c
+		if c.hasScore {
+			m.scores[c.id] = c.score
+		}
+		m.seen[c.id] = true
+		i := insertIndexNewestFirst(m.comments, c)
+		if i == 0 {
+			insertedAtTop = true
+		}
+		m.comments = slices.Insert(m.comments, i, c)
+		added++
+	}
+	if added == 0 {
+		return 0
+	}
+	if !m.ready {
+		return added
+	}
+	switch {
+	case insertedAtTop && wasTop:
+		m.refreshFeedAnchored(anchorPrepend)
+	case anchor == anchorKeep:
+		m.vp.SetYOffset(yOff)
+		m.refreshFeedAnchored(anchorKeep)
+	default:
+		m.refreshFeedAnchored(anchor)
+	}
+	return added
+}
+
+// mergeMoreIDs queues child IDs from Reddit "more" stubs that haven't been
+// fetched yet. Polls repeat the same stubs — this avoids re-enabling pagination
+// for IDs we already expanded via morechildren.
+func (m *model) mergeMoreIDs(ids []string) {
+	if m.fetchedMoreIDs == nil {
+		m.fetchedMoreIDs = map[string]bool{}
+	}
+queued:
+	for _, id := range ids {
+		if id == "" || m.fetchedMoreIDs[id] {
+			continue
+		}
+		for _, q := range m.commentMoreIDs {
+			if q == id {
+				continue queued
+			}
+		}
+		m.commentMoreIDs = append(m.commentMoreIDs, id)
+	}
+	m.commentsHasMore = len(m.commentMoreIDs) > 0
+}
+
+// markMoreFetched records child IDs consumed by a morechildren request.
+func (m *model) markMoreFetched(ids []string) {
+	if m.fetchedMoreIDs == nil {
+		m.fetchedMoreIDs = map[string]bool{}
+	}
+	for _, id := range ids {
+		if id != "" {
+			m.fetchedMoreIDs[id] = true
+		}
+	}
+}
+
+// releaseOne moves one pending comment into the visible feed at the correct
+// newest-first position.
 func (m *model) releaseOne() bool {
 	if len(m.pending) == 0 {
 		return false
@@ -128,9 +284,14 @@ func (m *model) releaseOne() bool {
 	c := m.pending[0]
 	m.pending = m.pending[1:]
 	c.shownAt = time.Now()
-	m.comments = append(m.comments, c)
+	anchor := anchorKeep
+	if len(m.comments) == 0 || c.postedAt.After(m.comments[0].postedAt) {
+		anchor = anchorPrepend
+	}
+	if m.mergeCommentsSorted([]comment{c}, anchor) == 0 {
+		return false
+	}
 	m.updatedAt = c.shownAt
-	m.refreshFeed()
 	return true
 }
 
@@ -146,22 +307,43 @@ func (m model) releaseDelay() time.Duration {
 // repaint on spinner ticks while something is actually moving.
 func (m model) anyFading() bool {
 	if n := len(m.comments); n > 0 {
-		return time.Since(m.comments[n-1].shownAt) < fadeDuration
+		return time.Since(m.comments[0].shownAt) < fadeDuration
 	}
 	return false
 }
 
-func (m *model) refreshFeed() {
+// scrollAnchor controls how refreshFeed adjusts the viewport after a repaint.
+type scrollAnchor int
+
+const (
+	anchorKeep    scrollAnchor = iota // keep the same y offset (scores, bottom append, fades)
+	anchorPrepend                     // content grew at the top — shift down unless already at top
+)
+
+func (m *model) refreshFeed() { m.refreshFeedAnchored(anchorKeep) }
+
+func (m *model) refreshFeedAnchored(anchor scrollAnchor) {
 	if !m.ready {
 		return
 	}
+	yOff := m.vp.YOffset
+	oldLines := m.feedLines
 	content, starts, total := m.feedContent()
 	m.commentStarts = starts
 	m.feedLines = total
-	wasBottom := m.vp.AtBottom()
 	m.vp.SetContent(content)
-	if wasBottom {
-		m.vp.GotoBottom()
+
+	switch anchor {
+	case anchorPrepend:
+		if yOff == 0 {
+			m.vp.GotoTop()
+		} else if delta := total - oldLines; delta > 0 {
+			m.vp.SetYOffset(yOff + delta)
+		} else {
+			m.vp.SetYOffset(yOff)
+		}
+	default:
+		m.vp.SetYOffset(yOff)
 	}
 }
 
@@ -259,19 +441,19 @@ func (m model) opContext() string {
 	return strings.Join(parts, "\n")
 }
 
-// commentsSinceLastSummary returns the bodies posted after the most recent
-// sentiment card (or all of them if there's none yet), capped at 60.
+// commentsSinceLastSummary returns the bodies of the newest real comments since
+// the most recent sentiment card (or all of them if there's none yet), capped at 60.
 func (m model) commentsSinceLastSummary() []string {
-	start := 0
-	for i := len(m.comments) - 1; i >= 0; i-- {
-		if m.comments[i].isSummary {
-			start = i + 1
+	end := len(m.comments)
+	for i, c := range m.comments {
+		if c.isSummary && strings.HasPrefix(c.aiHeader, "live sentiment") {
+			end = i
 			break
 		}
 	}
-	bodies := bodiesOf(m.comments[start:])
+	bodies := bodiesOf(m.comments[:end])
 	if len(bodies) > 60 {
-		bodies = bodies[len(bodies)-60:]
+		bodies = bodies[:60]
 	}
 	return bodies
 }
@@ -287,27 +469,26 @@ func bodiesOf(cs []comment) []string {
 	return out
 }
 
-// windowStart is the index of the last-n window of comments (a fixed-size tail),
-// distinct from commentsSinceLastSummary which starts at the most recent AI card.
-func (m model) windowStart(n int) int {
+// windowEnd is the exclusive end index of the first-n window of comments
+// (newest-first), distinct from commentsSinceLastSummary which stops at AI cards.
+func (m model) windowEnd(n int) int {
 	if len(m.comments) > n {
-		return len(m.comments) - n
+		return n
 	}
-	return 0
+	return len(m.comments)
 }
 
-// recentBodies returns the last n real comment bodies (AI cards excluded).
+// recentBodies returns the n newest real comment bodies (AI cards excluded).
 func (m model) recentBodies(n int) []string {
-	return bodiesOf(m.comments[m.windowStart(n):])
+	return bodiesOf(m.comments[:m.windowEnd(n)])
 }
 
 // recentAskedQA returns the user's earlier questions (and answers) still within
 // the recent window, for follow-up context. Older ones age out naturally as new
 // comments push them past the window.
 func (m model) recentAskedQA(n int) []string {
-	start := m.windowStart(n)
 	out := []string{}
-	for _, c := range m.comments[start:] {
+	for _, c := range m.comments[:m.windowEnd(n)] {
 		if c.isSummary && strings.HasPrefix(c.aiHeader, "asked: ") {
 			q := strings.TrimPrefix(c.aiHeader, "asked: ")
 			out = append(out, "you asked: \""+q+"\" → I answered: \""+c.body+"\"")
@@ -369,6 +550,59 @@ func (m *model) clampCursor() {
 	if m.listOffset < 0 {
 		m.listOffset = 0
 	}
+}
+
+// maybeLoadMoreThreads returns a command to fetch the next page when the cursor
+// sits on the last row and more pages are available.
+func (m *model) maybeLoadMoreThreads() tea.Cmd {
+	if m.filter != "" || !m.listHasMore || m.listLoadingMore || len(m.results) == 0 {
+		return nil
+	}
+	if m.cursor < len(m.results)-1 {
+		return nil
+	}
+	m.listLoadingMore = true
+	return fetchThreadsMoreCmd(m.subreddit, m.listSort, m.listAfter)
+}
+
+// appendThreadsPage merges a fetched page into the thread list, deduping by id.
+func (m *model) appendThreadsPage(page threadsPageMsg) {
+	seen := make(map[string]bool, len(m.threads))
+	for _, t := range m.threads {
+		seen[t.id] = true
+	}
+	for _, t := range page.threads {
+		if seen[t.id] {
+			continue
+		}
+		seen[t.id] = true
+		m.threads = append(m.threads, t)
+	}
+	m.listAfter = page.after
+	m.listHasMore = page.after != ""
+	m.listLoadingMore = false
+	m.recomputeResults()
+}
+
+// resetListPagination clears pagination state for a fresh subreddit fetch.
+func (m *model) resetListPagination() {
+	m.listAfter = ""
+	m.listHasMore = false
+	m.listLoadingMore = false
+}
+
+// maybeLoadMoreComments returns a command to fetch older comments when the user
+// has scrolled to the bottom of the feed.
+func (m *model) maybeLoadMoreComments() tea.Cmd {
+	if !m.live || !m.commentsHasMore || m.commentsLoadingMore || m.postID == "" {
+		return nil
+	}
+	if !m.vp.AtBottom() {
+		return nil
+	}
+	m.commentsLoadingMore = true
+	m.refreshFeed()
+	return fetchMoreCommentsCmd(m.postID, m.commentMoreIDs)
 }
 
 // activitySpark renders a sparkline of comments-per-bucket using ABSOLUTE time
@@ -447,5 +681,6 @@ func (m *model) demoEmit(p *demoPool, n int, hot bool) []comment {
 		out = append(out, demoComment(m.demoIndex, p.next(), hot))
 		m.demoIndex++
 	}
+	sortCommentsNewestFirst(out)
 	return out
 }

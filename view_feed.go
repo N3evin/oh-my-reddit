@@ -107,8 +107,40 @@ func (m model) feedContent() (string, []int, int) {
 		line += lipgloss.Height(b) + 2 // +2 for the two blank separator lines
 	}
 	total := line - 2 // last +2 was a separator that doesn't exist after the final block
+	body := strings.Join(blocks, "\n\n\n")
+	if footer := m.feedOlderFooter(); footer != "" {
+		body += "\n\n\n" + footer
+		total += lipgloss.Height(footer) + 2
+	}
 	// Two blank lines between comments so each gets room to breathe.
-	return feedStyle.Render(strings.Join(blocks, "\n\n\n")), starts, total
+	return feedStyle.Render(body), starts, total
+}
+
+// feedOlderFooter renders pagination hints at the bottom of the comment feed.
+func (m model) feedOlderFooter() string {
+	if !m.live || strings.TrimSpace(m.feedQuery) != "" {
+		return ""
+	}
+	var lines []string
+	if m.ready && m.vp.YOffset > 0 {
+		lines = append(lines, metaStyle.Render("  ↑ newer comments above"))
+	}
+	switch {
+	case m.commentsLoadingMore:
+		frame := spinner.Dot.Frames[m.tick%len(spinner.Dot.Frames)]
+		lines = append(lines, lipgloss.NewStyle().Foreground(colAccent).Render("  "+frame+" loading older comments…"))
+	case m.lastLoadFlash > 0 && time.Since(m.lastLoadAt) < loadFlashWindow:
+		lines = append(lines, lipgloss.NewStyle().Foreground(colAccent).Render(
+			"  +"+strconv.Itoa(m.lastLoadFlash)+" older comments loaded"))
+	case m.commentsHasMore:
+		lines = append(lines, metaStyle.Render("  ↓ scroll for more older comments"))
+	case m.olderLoadedTotal > 0:
+		lines = append(lines, bodyMutedStyle.Render("  ── oldest comments loaded ──"))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderComment fades a freshly released comment in (text brightens from faint
@@ -447,6 +479,14 @@ func (m model) renderStatus() string {
 	left += lipgloss.NewStyle().Width(lipgloss.Width(dotStyle) + lipgloss.Width("999 queued")).Render(queued)
 	if m.paused {
 		left += dotStyle + lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render("paused")
+	}
+	if m.commentsLoadingMore {
+		frame := spinner.Dot.Frames[m.tick%len(spinner.Dot.Frames)]
+		left += dotStyle + lipgloss.NewStyle().Foreground(colAccent).Render(frame+" loading older…")
+	} else if m.commentsHasMore && m.live {
+		left += dotStyle + metaStyle.Render("↓ older comments")
+	} else if m.olderLoadedTotal > 0 && m.live {
+		left += dotStyle + metaStyle.Render(strconv.Itoa(m.olderLoadedTotal)+" older loaded")
 	}
 
 	// Active modes replace the metrics with their own (short) prompt.

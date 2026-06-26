@@ -1,4 +1,4 @@
-module github.com/renatoworks/oh-my-reddit
+module github.com/n3evin/oh-my-reddit
 
 go 1.24.2
 

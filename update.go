@@ -32,7 +32,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp.Height = vpHeight
 		}
 		m.refreshFeed()
-		m.vp.GotoBottom()
+		m.vp.GotoTop()
 		if m.opOpen {
 			m.cacheOPImage() // re-render the image at the new width
 			m.syncOPModal()
@@ -53,7 +53,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.speakingID != "" && !m.speakEnd.IsZero() && time.Since(m.speakEnd) >= narrateRelease {
 			m.clearSpeakBand()
 		}
-		if m.screen == screenFeed && (m.anyFading() || m.speakingID != "" || len(m.comments) == 0) {
+		if m.screen == screenFeed && (m.anyFading() || m.speakingID != "" || len(m.comments) == 0 || m.commentsLoadingMore || m.lastLoadFlash > 0) {
 			m.refreshFeed() // animate the fade between releases, the loading dots, and the narration band
 		}
 		return m, tea.Batch(cmds...)
@@ -68,7 +68,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case threadsMsg:
 		m.loading = false
 		m.resorting = false
-		m.threads = []thread(msg)
+		m.threads = msg.threads
+		m.resetListPagination()
+		m.listAfter = msg.after
+		m.listHasMore = msg.after != ""
 		m.recomputeResults()
 		m.cursor = 0
 		m.listOffset = 0
@@ -78,6 +81,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.armEntrance() // rows appear now (after the load) — animate from here
 
+	case threadsPageMsg:
+		m.appendThreadsPage(msg)
+		return m, nil
+
+	case moreCommentsMsg:
+		m.commentsLoadingMore = false
+		m.markMoreFetched(msg.fetched)
+		m.commentMoreIDs = msg.moreIDs
+		m.commentsHasMore = len(m.commentMoreIDs) > 0
+		m.mergeMoreIDs(msg.nested)
+		n := m.appendOlderComments(msg.comments)
+		if n > 0 {
+			m.olderLoadedTotal += n
+			m.lastLoadFlash = n
+			m.lastLoadAt = time.Now()
+		}
+		return m, loadFlashClearCmd(m.loopGen)
+
+	case loadFlashMsg:
+		if msg.gen == m.loopGen && m.lastLoadFlash > 0 {
+			m.lastLoadFlash = 0
+			m.refreshFeed()
+		}
+		return m, nil
+
 	case batchMsg:
 		m.err = nil
 		if msg.post != nil {
@@ -85,6 +113,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.opOpen {
 				m.syncOPModal() // keep the open modal's body current
 			}
+		}
+		if msg.postID != "" {
+			m.postID = msg.postID
+		}
+		if len(msg.moreIDs) > 0 {
+			m.mergeMoreIDs(msg.moreIDs)
 		}
 		m.enqueue(msg.comments)
 		m.refreshFeed() // repaint so refreshed scores show even with no new comments
@@ -132,6 +166,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.resorting = false
+		m.listLoadingMore = false
+		m.commentsLoadingMore = false
 		m.summarizing = false
 		if errors.Is(msg.err, errAuth) {
 			// Session expired and couldn't be refreshed — prompt re-auth instead
@@ -238,6 +274,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ready {
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg)
+			if c := m.maybeLoadMoreComments(); c != nil {
+				return m, tea.Batch(cmd, c)
+			}
 			return m, cmd
 		}
 	}
@@ -378,6 +417,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "down":
 			m.cursor++
 			m.clampCursor()
+			if c := m.maybeLoadMoreThreads(); c != nil {
+				return m, c
+			}
 			return m, nil
 		case "left", "right":
 			// Cycle the listing order (hot ⇄ new ⇄ rising ⇄ top) and re-fetch.
@@ -560,6 +602,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "down", "j":
 			m.feedJump(1)
+			if c := m.maybeLoadMoreComments(); c != nil {
+				return m, c
+			}
 			return m, nil
 		case "r":
 			// Refresh now and restart the poll cycle from zero.
@@ -593,6 +638,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.ready {
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg)
+			if c := m.maybeLoadMoreComments(); c != nil {
+				return m, tea.Batch(cmd, c)
+			}
 			return m, cmd
 		}
 	}

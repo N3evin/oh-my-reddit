@@ -49,22 +49,46 @@ func releaseEvery(d time.Duration, gen int) tea.Cmd {
 
 func pollCmd(url string) tea.Cmd {
 	return func() tea.Msg {
-		p, cs, err := fetchComments(url)
+		tc, err := fetchComments(url)
 		if err != nil {
 			return errMsg{err}
 		}
-		return batchMsg{post: p, comments: cs}
+		return batchMsg{post: tc.post, comments: tc.comments, postID: tc.postID, moreIDs: tc.moreIDs}
 	}
 }
 
 func fetchThreadsCmd(sub string, sort listSort) tea.Cmd {
 	return func() tea.Msg {
-		ts, err := fetchThreads(sub, sort)
+		page, err := fetchThreads(sub, sort)
 		if err != nil {
 			return errMsg{err}
 		}
-		return threadsMsg(ts)
+		return threadsMsg{threads: page.threads, after: page.after}
 	}
+}
+
+func fetchThreadsMoreCmd(sub string, sort listSort, after string) tea.Cmd {
+	return func() tea.Msg {
+		page, err := fetchThreadsPage(sub, sort, after)
+		if err != nil {
+			return errMsg{err}
+		}
+		return threadsPageMsg{threads: page.threads, after: page.after}
+	}
+}
+
+func fetchMoreCommentsCmd(postID string, moreIDs []string) tea.Cmd {
+	return func() tea.Msg {
+		cs, remaining, fetched, nested, err := fetchMoreComments(postID, moreIDs)
+		if err != nil {
+			return errMsg{err}
+		}
+		return moreCommentsMsg{comments: cs, moreIDs: remaining, fetched: fetched, nested: nested}
+	}
+}
+
+func loadFlashClearCmd(gen int) tea.Cmd {
+	return tea.Tick(loadFlashWindow, func(time.Time) tea.Msg { return loadFlashMsg{gen} })
 }
 
 // summarizeCmd wraps summarizeSentiment as a tea.Cmd, mapping errors to aiErrMsg.

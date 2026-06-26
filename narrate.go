@@ -181,7 +181,7 @@ func narrateSay(text string, gen int) tea.Cmd {
 // newestNarratable returns the most recently shown real comment (skipping AI
 // cards and empties) — the one narration should read next.
 func (m model) newestNarratable() (comment, bool) {
-	for i := len(m.comments) - 1; i >= 0; i-- {
+	for i := 0; i < len(m.comments); i++ {
 		c := m.comments[i]
 		if c.isSummary || strings.TrimSpace(c.body) == "" {
 			continue

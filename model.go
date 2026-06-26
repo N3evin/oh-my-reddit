@@ -91,6 +91,8 @@ const (
 	fadeDuration     = 2200 * time.Millisecond
 	appearDuration   = 450 * time.Millisecond
 	initialCap       = 30 // cap the first batch so launch isn't a minutes-long drain
+	instantBurst       = 8  // newest comments shown immediately; the rest trickle below
+	loadFlashWindow  = 3 * time.Second // how long "+N older loaded" shows at the feed bottom
 
 	// Narration: read comments aloud as they arrive. We can't keep up with a
 	// fast thread, so it samples — after finishing one it pauses, then reads the
@@ -123,8 +125,24 @@ type aiSpokeDoneMsg struct{}
 type batchMsg struct {
 	post     *post
 	comments []comment
+	postID   string
+	moreIDs  []string
 }
-type threadsMsg []thread
+type threadsMsg struct {
+	threads []thread
+	after   string
+}
+type threadsPageMsg struct {
+	threads []thread
+	after   string
+}
+type moreCommentsMsg struct {
+	comments []comment
+	moreIDs  []string // remaining unfetched child IDs
+	fetched  []string // child IDs consumed by this request
+	nested   []string // new "more" child IDs from the response
+}
+type loadFlashMsg struct{ gen int }
 type summaryMsg struct{ text string }
 type answerMsg struct{ question, text string }
 type errMsg struct{ err error }
@@ -187,9 +205,12 @@ type model struct {
 	results    []thread // threads after the fuzzy filter (what's navigated)
 	filter     string
 	cursor     int
-	listOffset int  // first visible result row (for scrolling)
-	loading    bool // initial subreddit fetch (shows the full-page loader)
-	resorting  bool // re-fetching after a sort change (keeps the list in place)
+	listOffset      int  // first visible result row (for scrolling)
+	loading         bool // initial subreddit fetch (shows the full-page loader)
+	resorting       bool // re-fetching after a sort change (keeps the list in place)
+	listAfter       string
+	listHasMore     bool
+	listLoadingMore bool
 
 	// OP modal
 	op             *post          // the OP submission (nil for demo/RSS until fetched)
@@ -202,11 +223,19 @@ type model struct {
 	opImageRenderW int            // content width opImageRender was built at
 
 	// live comment feed
-	comments      []comment          // visible
-	pending       []comment          // fetched, awaiting graceful release
-	seen          map[string]bool    // dedup by id
-	byName        map[string]comment // fullname -> comment, to resolve reply parents
-	scores        map[string]int     // latest score per id, refreshed every poll
+	comments            []comment          // visible, newest-first
+	pending             []comment          // fetched, awaiting graceful release
+	seen                map[string]bool    // dedup by id
+	byName              map[string]comment // fullname -> comment, to resolve reply parents
+	scores              map[string]int     // latest score per id, refreshed every poll
+	postID              string             // t3_ fullname for morechildren pagination
+	commentMoreIDs      []string           // pending morechildren batches
+	fetchedMoreIDs      map[string]bool    // child IDs already sent to morechildren
+	commentsHasMore     bool
+	commentsLoadingMore bool
+	olderLoadedTotal    int       // comments fetched via pagination (not initial poll)
+	lastLoadFlash       int       // count from the most recent pagination batch
+	lastLoadAt          time.Time // when lastLoadFlash was set (drives the transient hint)
 	vp            viewport.Model
 	ready         bool
 	title         string
