@@ -662,7 +662,7 @@ type threadComments struct {
 // parent_id for threading, plus the OP submission) and falling back to RSS when
 // JSON is blocked. The post is nil on the RSS path (RSS carries no OP body).
 func fetchComments(threadRef string) (threadComments, error) {
-	if tc, err := fetchCommentsJSON(threadRef); err == nil && len(tc.comments) > 0 {
+	if tc, err := fetchCommentsJSON(threadRef); err == nil {
 		return tc, nil
 	}
 	cs, err := fetchCommentsRSS(threadRef)
