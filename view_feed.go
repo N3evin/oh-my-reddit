@@ -83,7 +83,7 @@ func (m model) feedContent() (string, []int, int) {
 		switch {
 		case strings.TrimSpace(m.feedQuery) != "":
 			hint = bodyMutedStyle.Render("no comments match “" + m.feedQuery + "”")
-		case m.live:
+		case m.live && m.op == nil && m.postID == "":
 			hint = m.loaderLine("fetching the thread…")
 		default:
 			hint = m.loaderLine("waiting for comments…")

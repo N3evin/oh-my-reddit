@@ -104,6 +104,29 @@ func TestParseThreadJSON(t *testing.T) {
 	}
 }
 
+func TestParseThreadJSONNoComments(t *testing.T) {
+	body := []byte(`[
+		{"data":{"children":[{"data":{
+			"id":"x","title":"Fresh post","author":"op","selftext":"no replies yet","score":1,"created_utc":1700000000,"is_self":true
+		}}]}},
+		{"data":{"children":[]}}
+	]`)
+
+	tc, err := parseThreadJSON(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tc.post == nil || tc.post.title != "Fresh post" {
+		t.Fatalf("expected OP, got %+v", tc.post)
+	}
+	if tc.postID != "t3_x" {
+		t.Errorf("postID = %q, want t3_x", tc.postID)
+	}
+	if len(tc.comments) != 0 {
+		t.Errorf("want 0 comments, got %d", len(tc.comments))
+	}
+}
+
 func TestParseMoreChildrenJSON(t *testing.T) {
 	body := []byte(`{"json":{"data":{"things":[
 		{"kind":"t1","data":{"id":"m1","author":"u","body":"older comment","score":1,"created_utc":1700000000,"parent_id":"t3_x"}},
