@@ -170,12 +170,11 @@ func fetchBytes(rawURL string) ([]byte, error) {
 			lastErr = fmt.Errorf("reddit busy (%s)", resp.Status)
 			continue
 		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
-			// Likely a missing/stale session — try to (re)acquire one from the
-			// browser and retry immediately; otherwise surface the error.
-			if changed, _ := renewCookie(); changed {
-				continue // silently rode a fresh browser session; retry
+			if retry, aerr := authFailure(resp.Status); retry {
+				continue
+			} else {
+				return nil, aerr
 			}
-			return nil, errAuth // expired and unrenewable — prompt re-auth
 		case resp.StatusCode == http.StatusNotFound:
 			return nil, errNotFound // callers turn this into a friendly message
 		default:
@@ -259,10 +258,11 @@ func postForm(rawURL string, form url.Values) ([]byte, error) {
 			lastErr = fmt.Errorf("reddit busy (%s)", resp.Status)
 			continue
 		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
-			if changed, _ := renewCookie(); changed {
+			if retry, aerr := authFailure(resp.Status); retry {
 				continue
+			} else {
+				return nil, aerr
 			}
-			return nil, errAuth
 		case resp.StatusCode == http.StatusNotFound:
 			return nil, errNotFound
 		default:
@@ -324,9 +324,25 @@ type threadsResult struct {
 // context-specific message instead of a raw status line.
 var errNotFound = errors.New("not found")
 
-// errAuth is a 401/403 that a browser-cookie refresh couldn't fix — the reddit
-// session has expired. Callers route this to the connect screen for re-auth.
+// errAuth is a 401/403 where the current session itself is confirmed dead and
+// a browser-cookie refresh couldn't fix it. Callers route this to the connect
+// screen for re-auth.
 var errAuth = errors.New("session expired")
+
+// authFailure decides how to react to a 401/403. A cookie that still resolves
+// to a live username is fine — the block is about this one resource (a
+// quarantined/private/banned subreddit, a one-off bot check), not the login —
+// so callers must NOT treat it as a dead session. Only when the current cookie
+// is actually dead do we try a browser-cookie renewal before giving up.
+func authFailure(status string) (retry bool, err error) {
+	if name, reached := fetchUsernameFor(currentCookie()); reached && name != "" {
+		return false, fmt.Errorf("reddit blocked this request (%s)", status)
+	}
+	if changed, _ := renewCookie(); changed {
+		return true, nil // rode a fresh browser session; caller retries
+	}
+	return false, errAuth
+}
 
 // listSort is a subreddit listing order. Its string value is the Reddit URL
 // path segment ("hot", "new", …), so the type doubles as that path component.
