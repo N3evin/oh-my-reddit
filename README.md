@@ -41,6 +41,8 @@ oh-my-reddit r/soccer        # jump straight to a subreddit's thread list
 oh-my-reddit https://www.reddit.com/r/soccer/comments/<id>/...   # open one thread
 ```
 
+In the feed, `↑`/`↓` (or `k`/`j`) glide between comments, and the mouse wheel scrolls the feed and the thread list. Mouse capture is on, so hold Shift (Option on macOS) to select text with the mouse.
+
 ## Signing in
 
 Reddit throttles anonymous access hard (lots of `429` and `403`), so you need to be logged in. The first time you run it (unless you pass `demo`) you get a connect screen. Press `enter` and it finds a logged-in reddit session in your browser (Chrome, Brave, Edge, Vivaldi, Safari, Firefox, across all profiles) and reuses it, no copy and paste. If auto-detect comes up empty, you can paste one by hand: on reddit.com (logged in), open DevTools, and from the Network tab copy any request's full `Cookie:` header.

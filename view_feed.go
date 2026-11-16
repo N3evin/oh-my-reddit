@@ -2,6 +2,7 @@ package main
 
 import (
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -468,7 +469,8 @@ func (m model) renderStatus() string {
 		left += "  " + lipgloss.NewStyle().Foreground(colMuted).Render(m.activitySpark())
 	}
 	if mid {
-		left += dotStyle + "updated " + statusKeyStyle.Render(updated)
+		// Fixed width ("just now") so the bar doesn't shift as digits change
+		left += dotStyle + "updated " + lipgloss.NewStyle().Width(len("just now")).Render(statusKeyStyle.Render(updated))
 	}
 	// Reserve a fixed-width slot for the "N queued" indicator so the bar doesn't
 	// reflow when it appears/disappears — the space is held even when it's blank.
@@ -538,18 +540,38 @@ func (m model) renderStatus() string {
 		for i, s := range segs {
 			parts[i] = s.text
 		}
-		return strings.Join(parts, " · ")
+		sep := ""
+		if left != "" {
+			sep = "· "
+		}
+		return sep + strings.Join(parts, " · ")
 	}
-	// Shed the lowest-priority segment until the help fits beside the metrics.
-	avail := m.width - 4 - lipgloss.Width(left) // -2 bar padding, -2 minimum gap
-	for len(segs) > 1 && lipgloss.Width(metaStyle.Render(build())) > avail {
-		lo := 0
-		for i := 1; i < len(segs); i++ {
-			if segs[i].prio < segs[lo].prio {
-				lo = i
+	// Keep the highest-priority segments that fit, skipping (not stopping at)
+	// ones too wide, so leftover space gets filled.
+	avail := m.width - 3 - lipgloss.Width(left) // -2 bar padding, -1 space before help
+	all := segs
+	order := make([]int, len(all))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return all[order[a]].prio > all[order[b]].prio })
+	keep := make([]bool, len(all))
+	pick := func() {
+		segs = nil
+		for i, s := range all {
+			if keep[i] {
+				segs = append(segs, s)
 			}
 		}
-		segs = append(segs[:lo], segs[lo+1:]...)
 	}
-	return m.footerBar(left, build())
+	for _, idx := range order {
+		keep[idx] = true
+		pick()
+		if len(segs) > 1 && lipgloss.Width(metaStyle.Render(build())) > avail {
+			keep[idx] = false
+		}
+	}
+	pick()
+	// Help follows the metrics inline; spare space goes to the right edge
+	return m.footerBar(left+" "+metaStyle.Render(build()), "")
 }

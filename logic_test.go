@@ -163,10 +163,10 @@ func TestURLBuilders(t *testing.T) {
 	if got := threadsJSONURL("soccer", sortNew, "t3_abc"); got != "https://www.reddit.com/r/soccer/new.json?limit=100&raw_json=1&after=t3_abc" {
 		t.Errorf("threadsJSONURL with after = %q", got)
 	}
-	if got := threadsRSSURL("soccer", sortHot); got != "https://www.reddit.com/r/soccer/.rss" {
+	if got := threadsRSSURL("soccer", sortHot, ""); got != "https://www.reddit.com/r/soccer/.rss?limit=100" {
 		t.Errorf("threadsRSSURL hot = %q", got)
 	}
-	if got := threadsRSSURL("soccer", sortNew); got != "https://www.reddit.com/r/soccer/new/.rss" {
+	if got := threadsRSSURL("soccer", sortNew, ""); got != "https://www.reddit.com/r/soccer/new/.rss?limit=100" {
 		t.Errorf("threadsRSSURL new = %q", got)
 	}
 
@@ -175,7 +175,7 @@ func TestURLBuilders(t *testing.T) {
 	if got := jsonURL("https://www.reddit.com/r/soccer/comments/abc/title/"); got != want {
 		t.Errorf("jsonURL = %q, want %q", got, want)
 	}
-	if got := rssURL("/r/soccer/comments/abc/title/"); got != "https://www.reddit.com/r/soccer/comments/abc/title/.rss" {
+	if got := rssURL("/r/soccer/comments/abc/title/"); got != "https://www.reddit.com/r/soccer/comments/abc/title/.rss?limit=100" {
 		t.Errorf("rssURL = %q", got)
 	}
 }

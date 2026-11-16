@@ -95,7 +95,15 @@ func (m model) renderThreadList() string {
 	// Each visible row staggers in (content-relative position; only the visible
 	// window is rendered, so the cascade stays bounded).
 	rowFade := func(pos int) float64 { return m.fade(pos) }
-	header := lipgloss.NewStyle().Width(listW).Align(lipgloss.Right).Foreground(fadeColor(colFaint, m.fade(0))).Render("comments")
+	// RSS listings carry no counts; hide the column label then
+	headerText := ""
+	for _, t := range m.threads {
+		if t.numComments > 0 {
+			headerText = "comments"
+			break
+		}
+	}
+	header := lipgloss.NewStyle().Width(listW).Align(lipgloss.Right).Foreground(fadeColor(colFaint, m.fade(0))).Render(headerText)
 
 	results := m.results
 	if len(results) == 0 {

@@ -22,6 +22,22 @@ func animTickCmd(gen int) tea.Cmd {
 	return tea.Tick(animFrame, func(time.Time) tea.Msg { return animTickMsg{gen} })
 }
 
+// scrollDuration is how long one glide takes; raise to slow it.
+const scrollDuration = 400 * time.Millisecond
+
+// scrollTickMsg steps the smooth-scroll glide.
+type scrollTickMsg struct{ gen int }
+
+func scrollTickCmd(gen int) tea.Cmd {
+	return tea.Tick(16*time.Millisecond, func(time.Time) tea.Msg { return scrollTickMsg{gen} })
+}
+
+// cancelGlide stops any smooth scroll in progress.
+func (m *model) cancelGlide() {
+	m.scrolling = false
+	m.scrollGen++
+}
+
 // armEntrance (re)starts the entrance animation: anchors the timeline to now and
 // kicks the fast repaint loop, superseding any previous one.
 func (m *model) armEntrance() tea.Cmd {

@@ -35,6 +35,7 @@ func (m *model) startFeed(url, title, sub string, live bool) {
 	m.scores = map[string]int{}
 	m.postID = ""
 	m.commentMoreIDs = nil
+	m.cancelGlide()
 	m.fetchedMoreIDs = map[string]bool{}
 	m.commentsHasMore = false
 	m.commentsLoadingMore = false
@@ -339,6 +340,10 @@ func (m *model) refreshFeedAnchored(anchor scrollAnchor) {
 			m.vp.GotoTop()
 		} else if delta := total - oldLines; delta > 0 {
 			m.vp.SetYOffset(yOff + delta)
+			if m.scrolling {
+				m.scrollTarget += delta
+				m.scrollFrom += delta
+			}
 		} else {
 			m.vp.SetYOffset(yOff)
 		}
@@ -348,11 +353,15 @@ func (m *model) refreshFeedAnchored(anchor scrollAnchor) {
 }
 
 // feedJump steps to the previous/next comment, scrolling so that comment's
-// LAST line sits on the bottom row of the viewport.
-func (m *model) feedJump(dir int) {
+// LAST line sits on the bottom row, but never more than a screen at a time.
+func (m *model) feedJump(dir int) tea.Cmd {
 	n := len(m.commentStarts)
 	if !m.ready || n == 0 {
-		return
+		return nil
+	}
+	base := m.vp.YOffset
+	if m.scrolling {
+		base = m.scrollTarget // chain from where the glide is heading
 	}
 	h := m.vp.Height
 	if h < 1 {
@@ -367,7 +376,7 @@ func (m *model) feedJump(dir int) {
 	}
 
 	// Current comment = the lowest one whose end is at/above the bottom row.
-	bottom := m.vp.YOffset + h - 1
+	bottom := base + h - 1
 	cur := 0
 	for i := 0; i < n; i++ {
 		if end(i) <= bottom {
@@ -388,7 +397,30 @@ func (m *model) feedJump(dir int) {
 	if desired < 0 {
 		desired = 0
 	}
-	m.vp.SetYOffset(desired)
+	// Cap the step so long comments page with overlap instead of skipping text.
+	step := h - 2
+	if step < 1 {
+		step = 1
+	}
+	if d := desired - base; d > step {
+		desired = base + step
+	} else if d < -step {
+		desired = base - step
+	}
+	desired = max(0, min(desired, max(0, m.feedLines-m.vp.Height)))
+	m.scrollTarget = desired
+	if desired == m.vp.YOffset {
+		return nil
+	}
+	// Restart the clock from here so chained presses stay smooth
+	m.scrollFrom = m.vp.YOffset
+	m.scrollStart = time.Now()
+	if m.scrolling {
+		return nil
+	}
+	m.scrolling = true
+	m.scrollGen++
+	return scrollTickCmd(m.scrollGen)
 }
 
 // --- recents ---------------------------------------------------------------
@@ -567,20 +599,28 @@ func (m *model) maybeLoadMoreThreads() tea.Cmd {
 
 // appendThreadsPage merges a fetched page into the thread list, deduping by id.
 func (m *model) appendThreadsPage(page threadsPageMsg) {
+	if page.sort != m.listSort || page.cursor != m.listAfter {
+		return // stale: sort changed or list refetched mid-flight
+	}
+	m.listLoadingMore = false
+	if page.err != nil {
+		return // keep the cursor so the next scroll retries
+	}
 	seen := make(map[string]bool, len(m.threads))
 	for _, t := range m.threads {
 		seen[t.id] = true
 	}
+	added := 0
 	for _, t := range page.threads {
 		if seen[t.id] {
 			continue
 		}
 		seen[t.id] = true
 		m.threads = append(m.threads, t)
+		added++
 	}
 	m.listAfter = page.after
-	m.listHasMore = page.after != ""
-	m.listLoadingMore = false
+	m.listHasMore = page.after != "" && added > 0
 	m.recomputeResults()
 }
 

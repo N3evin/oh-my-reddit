@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -58,6 +59,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case scrollTickMsg:
+		if msg.gen != m.scrollGen || !m.scrolling {
+			return m, nil
+		}
+		// Time-based so speed doesn't depend on tick jitter
+		t := float64(time.Since(m.scrollStart)) / float64(scrollDuration)
+		if t > 1 {
+			t = 1
+		}
+		eased := 4 * t * t * t // ease-in-out cubic
+		if t >= 0.5 {
+			eased = 1 - math.Pow(-2*t+2, 3)/2
+		}
+		y := m.scrollFrom + int(math.Round(float64(m.scrollTarget-m.scrollFrom)*eased))
+		m.vp.SetYOffset(y)
+		// Stop when done or the viewport clamped us short
+		if t >= 1 || m.vp.YOffset == m.scrollTarget || m.vp.YOffset != y {
+			m.scrolling = false
+			return m, m.maybeLoadMoreComments()
+		}
+		return m, scrollTickCmd(m.scrollGen)
+
+	case tea.MouseMsg:
+		wheel := msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown
+		if !wheel || msg.Action != tea.MouseActionPress {
+			return m, nil
+		}
+		switch m.screen {
+		case screenFeed:
+			if !m.ready {
+				return m, nil
+			}
+			m.cancelGlide()
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			return m, tea.Batch(cmd, m.maybeLoadMoreComments())
+		case screenList:
+			if msg.Button == tea.MouseButtonWheelUp {
+				m.cursor--
+				m.clampCursor()
+				return m, nil
+			}
+			m.cursor++
+			m.clampCursor()
+			return m, m.maybeLoadMoreThreads()
+		}
+		return m, nil
+
 	case animTickMsg:
 		// Keep repainting at ~30fps while the entrance fade runs (View redraws it).
 		if msg.gen == m.animGen && time.Since(m.enteredAt) < animWindow {
@@ -66,6 +115,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case threadsMsg:
+		if msg.sub != m.subreddit || msg.sort != m.listSort {
+			return m, nil // stale: sort or subreddit changed mid-flight
+		}
+		if msg.err != nil {
+			return m.Update(errMsg{msg.err})
+		}
 		m.loading = false
 		m.resorting = false
 		m.threads = msg.threads
@@ -598,14 +653,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.askQuery = ""
 			return m, nil
 		case "up", "k":
-			m.feedJump(-1)
-			return m, nil
+			return m, m.feedJump(-1)
 		case "down", "j":
-			m.feedJump(1)
-			if c := m.maybeLoadMoreComments(); c != nil {
-				return m, c
-			}
-			return m, nil
+			return m, tea.Batch(m.feedJump(1), m.maybeLoadMoreComments())
 		case "r":
 			// Refresh now and restart the poll cycle from zero.
 			m.loopGen++
@@ -637,6 +687,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.ready {
 			var cmd tea.Cmd
+			m.cancelGlide()
 			m.vp, cmd = m.vp.Update(msg)
 			if c := m.maybeLoadMoreComments(); c != nil {
 				return m, tea.Batch(cmd, c)

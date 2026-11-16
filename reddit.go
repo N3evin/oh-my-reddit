@@ -293,7 +293,7 @@ func rssURL(raw string) string {
 	path = strings.TrimSuffix(path, "/")
 	path = strings.TrimSuffix(path, ".rss")
 	path = strings.TrimSuffix(path, "/")
-	return "https://www.reddit.com" + path + "/.rss"
+	return "https://www.reddit.com" + path + "/.rss?limit=100"
 }
 
 // jsonListing models a subreddit listing (any sort order). JSON (unlike RSS)
@@ -367,18 +367,21 @@ func fetchThreads(subreddit string, sort listSort) (threadsResult, error) {
 	if page, err := fetchThreadsJSON(sub, sort, ""); err == nil && len(page.threads) > 0 {
 		return page, nil
 	}
-	ts, err := fetchThreadsRSS(sub, sort)
+	page, err := fetchThreadsRSS(sub, sort, "")
 	if errors.Is(err, errNotFound) {
 		return threadsResult{}, fmt.Errorf("no subreddit called r/%s", sub)
 	}
-	return threadsResult{threads: ts}, err
+	return page, err
 }
 
 // fetchThreadsPage loads the next page of a subreddit listing using Reddit's
-// "after" cursor. JSON only — RSS has no pagination.
+// "after" cursor, falling back to RSS (which also honors it) when JSON is blocked.
 func fetchThreadsPage(subreddit string, sort listSort, after string) (threadsResult, error) {
 	sub := cleanSubreddit(subreddit)
-	return fetchThreadsJSON(sub, sort, after)
+	if page, err := fetchThreadsJSON(sub, sort, after); err == nil {
+		return page, nil
+	}
+	return fetchThreadsRSS(sub, sort, after)
 }
 
 // threadsJSONURL builds a subreddit listing endpoint for the given sort. "top"
@@ -436,26 +439,31 @@ func parseThreadsJSON(body []byte, pinStickies bool) ([]thread, string, error) {
 
 // threadsRSSURL builds the Atom feed for a subreddit listing. Hot is the bare
 // feed; other sorts live under their own path (top carries a time window).
-func threadsRSSURL(sub string, sort listSort) string {
+func threadsRSSURL(sub string, sort listSort, after string) string {
+	u := "https://www.reddit.com/r/" + sub + "/" + string(sort) + "/.rss?limit=100"
 	if sort == sortHot {
-		return "https://www.reddit.com/r/" + sub + "/.rss"
+		u = "https://www.reddit.com/r/" + sub + "/.rss?limit=100"
 	}
-	u := "https://www.reddit.com/r/" + sub + "/" + string(sort) + "/.rss"
 	if sort == sortTop {
-		u += "?t=day"
+		u += "&t=day"
+	}
+	if after != "" {
+		u += "&after=" + url.QueryEscape(after)
 	}
 	return u
 }
 
-func fetchThreadsRSS(sub string, sort listSort) ([]thread, error) {
-	body, err := fetchBytes(threadsRSSURL(sub, sort))
+// fetchThreadsRSS has no explicit end cursor, so the last entry is the next
+// cursor; an empty page ends pagination.
+func fetchThreadsRSS(sub string, sort listSort, after string) (threadsResult, error) {
+	body, err := fetchBytes(threadsRSSURL(sub, sort, after))
 	if err != nil {
-		return nil, err
+		return threadsResult{}, err
 	}
 
 	var feed atomFeed
 	if err := xml.Unmarshal(body, &feed); err != nil {
-		return nil, fmt.Errorf("could not parse r/%s feed", sub)
+		return threadsResult{}, fmt.Errorf("could not parse r/%s feed", sub)
 	}
 
 	out := make([]thread, 0, len(feed.Entries))
@@ -471,9 +479,12 @@ func fetchThreadsRSS(sub string, sort listSort) ([]thread, error) {
 		})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no threads found in r/%s", sub)
+		if after != "" {
+			return threadsResult{}, nil // past the last page
+		}
+		return threadsResult{}, fmt.Errorf("no threads found in r/%s", sub)
 	}
-	return out, nil
+	return threadsResult{threads: out, after: "t3_" + out[len(out)-1].id}, nil
 }
 
 // jsonComment models a node in the comment tree. Replies is "" (string) when

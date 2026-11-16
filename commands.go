@@ -60,20 +60,14 @@ func pollCmd(url string) tea.Cmd {
 func fetchThreadsCmd(sub string, sort listSort) tea.Cmd {
 	return func() tea.Msg {
 		page, err := fetchThreads(sub, sort)
-		if err != nil {
-			return errMsg{err}
-		}
-		return threadsMsg{threads: page.threads, after: page.after}
+		return threadsMsg{threads: page.threads, after: page.after, sub: sub, sort: sort, err: err}
 	}
 }
 
 func fetchThreadsMoreCmd(sub string, sort listSort, after string) tea.Cmd {
 	return func() tea.Msg {
 		page, err := fetchThreadsPage(sub, sort, after)
-		if err != nil {
-			return errMsg{err}
-		}
-		return threadsPageMsg{threads: page.threads, after: page.after}
+		return threadsPageMsg{threads: page.threads, after: page.after, sort: sort, cursor: after, err: err}
 	}
 }
 

@@ -90,8 +90,8 @@ const (
 	releaseFast      = 180 * time.Millisecond // drain a backlog (e.g. first load)
 	fadeDuration     = 2200 * time.Millisecond
 	appearDuration   = 450 * time.Millisecond
-	initialCap       = 30 // cap the first batch so launch isn't a minutes-long drain
-	instantBurst       = 8  // newest comments shown immediately; the rest trickle below
+	initialCap       = 30              // cap the first batch so launch isn't a minutes-long drain
+	instantBurst     = 8               // newest comments shown immediately; the rest trickle below
 	loadFlashWindow  = 3 * time.Second // how long "+N older loaded" shows at the feed bottom
 
 	// Narration: read comments aloud as they arrive. We can't keep up with a
@@ -131,10 +131,16 @@ type batchMsg struct {
 type threadsMsg struct {
 	threads []thread
 	after   string
+	sub     string // request identity, to drop stale replies
+	sort    listSort
+	err     error
 }
 type threadsPageMsg struct {
 	threads []thread
 	after   string
+	sort    listSort // request identity, to drop stale pages
+	cursor  string
+	err     error
 }
 type moreCommentsMsg struct {
 	comments []comment
@@ -198,13 +204,13 @@ type model struct {
 	recentThreads []recentThread
 
 	// thread list
-	subreddit  string   // canonical bare name (no "r/"); fetches, AI, recents
-	subLabel   string   // display label for the feed header ("r/soccer", "live")
-	listSort   listSort // listing order for the thread list: hot/new/rising/top
-	threads    []thread
-	results    []thread // threads after the fuzzy filter (what's navigated)
-	filter     string
-	cursor     int
+	subreddit       string   // canonical bare name (no "r/"); fetches, AI, recents
+	subLabel        string   // display label for the feed header ("r/soccer", "live")
+	listSort        listSort // listing order for the thread list: hot/new/rising/top
+	threads         []thread
+	results         []thread // threads after the fuzzy filter (what's navigated)
+	filter          string
+	cursor          int
 	listOffset      int  // first visible result row (for scrolling)
 	loading         bool // initial subreddit fetch (shows the full-page loader)
 	resorting       bool // re-fetching after a sort change (keeps the list in place)
@@ -236,24 +242,24 @@ type model struct {
 	olderLoadedTotal    int       // comments fetched via pagination (not initial poll)
 	lastLoadFlash       int       // count from the most recent pagination batch
 	lastLoadAt          time.Time // when lastLoadFlash was set (drives the transient hint)
-	vp            viewport.Model
-	ready         bool
-	title         string
-	live          bool
-	url           string
-	interval      time.Duration
-	demoIndex     int
-	demoBeat      int // demo poll counter, drives the bursts-and-lulls rhythm
-	updatedAt     time.Time
-	paused        bool
-	loopGen       int      // current timer generation
-	commentStarts []int    // line index where each comment block begins (for jump nav)
-	feedLines     int      // total line count of the rendered feed
-	feedMode      feedMode // active feed input mode (idle / searching / asking)
-	feedQuery     string   // active in-thread filter
-	askQuery      string   // the question being typed
-	summarizing   bool     // an AI request is in flight
-	aiEnabled     bool     // an OPENAI_API_KEY is set; gates the s/a features and their help
+	vp                  viewport.Model
+	ready               bool
+	title               string
+	live                bool
+	url                 string
+	interval            time.Duration
+	demoIndex           int
+	demoBeat            int // demo poll counter, drives the bursts-and-lulls rhythm
+	updatedAt           time.Time
+	paused              bool
+	loopGen             int      // current timer generation
+	commentStarts       []int    // line index where each comment block begins (for jump nav)
+	feedLines           int      // total line count of the rendered feed
+	feedMode            feedMode // active feed input mode (idle / searching / asking)
+	feedQuery           string   // active in-thread filter
+	askQuery            string   // the question being typed
+	summarizing         bool     // an AI request is in flight
+	aiEnabled           bool     // an OPENAI_API_KEY is set; gates the s/a features and their help
 
 	// voice + narration (macOS `say`)
 	voice       bool      // master voice switch: narrate comments AND speak AI cards
@@ -270,6 +276,13 @@ type model struct {
 	enteredAt  time.Time // when the current screen was entered (drives entrance fade)
 	animScreen screen    // screen the entrance animation is armed for
 	animGen    int       // invalidates a stale entrance-repaint loop
+
+	// smooth scroll glide
+	scrollTarget int       // YOffset the glide is heading to
+	scrolling    bool      // glide in progress
+	scrollGen    int       // invalidates stale scroll ticks
+	scrollFrom   int       // YOffset the glide started at
+	scrollStart  time.Time // when the glide started
 
 	sp  spinner.Model
 	err error
