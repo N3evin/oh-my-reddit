@@ -154,13 +154,13 @@ func TestURLBuilders(t *testing.T) {
 		t.Errorf("cleanSubreddit = %q, want golang", got)
 	}
 
-	if got := threadsJSONURL("soccer", sortNew, ""); got != "https://www.reddit.com/r/soccer/new.json?limit=100&raw_json=1" {
+	if got := threadsJSONURL("soccer", sortNew, ""); got != "https://oauth.reddit.com/r/soccer/new.json?limit=100&raw_json=1" {
 		t.Errorf("threadsJSONURL new = %q", got)
 	}
 	if got := threadsJSONURL("soccer", sortTop, ""); !strings.Contains(got, "/top.json") || !strings.Contains(got, "t=day") {
 		t.Errorf("threadsJSONURL top = %q, want /top.json and t=day", got)
 	}
-	if got := threadsJSONURL("soccer", sortNew, "t3_abc"); got != "https://www.reddit.com/r/soccer/new.json?limit=100&raw_json=1&after=t3_abc" {
+	if got := threadsJSONURL("soccer", sortNew, "t3_abc"); got != "https://oauth.reddit.com/r/soccer/new.json?limit=100&raw_json=1&after=t3_abc" {
 		t.Errorf("threadsJSONURL with after = %q", got)
 	}
 	if got := threadsRSSURL("soccer", sortHot, ""); got != "https://www.reddit.com/r/soccer/.rss?limit=100" {
@@ -171,7 +171,7 @@ func TestURLBuilders(t *testing.T) {
 	}
 
 	// jsonURL accepts a full thread URL or a bare path and normalizes suffixes.
-	want := "https://www.reddit.com/r/soccer/comments/abc/title.json?sort=new&limit=100&raw_json=1"
+	want := "https://oauth.reddit.com/r/soccer/comments/abc/title.json?sort=new&limit=100&raw_json=1"
 	if got := jsonURL("https://www.reddit.com/r/soccer/comments/abc/title/"); got != want {
 		t.Errorf("jsonURL = %q, want %q", got, want)
 	}

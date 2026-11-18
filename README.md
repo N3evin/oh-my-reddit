@@ -94,7 +94,7 @@ say "oh my reddit"
 
 ## How it works
 
-- **No OAuth, no app registration.** Comments come from a thread's JSON endpoint (`?sort=new`), which carries scores and `parent_id` for replies. If JSON is blocked it falls back to the RSS feed (flat, no scores). Subreddit listings work the same way.
+- **No OAuth, no app registration.** Comments come from a thread's JSON endpoint on oauth.reddit.com (`?sort=new`, reached with the browser cookie), which carries scores and `parent_id` for replies. If JSON is blocked it falls back to the RSS feed (flat, no scores). Subreddit listings work the same way.
 - **Polling.** The feed polls every 10 seconds. It uses conditional requests (`If-None-Match` and `If-Modified-Since`) so Reddit can answer `304 Not Modified` when nothing changed, which is cheap and less likely to get throttled. On `429` or `5xx` it honors `Retry-After` and backs off with jitter.
 - **Graceful streaming.** New comments are queued and released one at a time, each fading in, instead of dumping all at once.
 - **Live votes.** Each poll refreshes every visible comment's score.

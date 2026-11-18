@@ -23,7 +23,7 @@ go vet ./...
 
 - Standard Bubble Tea Model/Update/View. All state is one `model` struct (`model.go`), grouped by screen with section comments.
 - Four screens routed by the `screen` enum: connect (auth), input, thread list, feed.
-- Comments come from a thread's JSON endpoint (`sort=new`), with an RSS fallback when JSON is blocked. The feed polls every 10s with conditional requests and backoff (`reddit.go`).
+- Comments come from a thread's JSON endpoint on oauth.reddit.com (`sort=new`; www 403s JSON), with an RSS fallback when JSON is blocked. The feed polls every 10s with conditional requests and backoff (`reddit.go`).
 - New comments are queued and released one at a time so a busy thread streams smoothly instead of dumping all at once (`feed.go`).
 - Background work (polling, fetching, AI, narration) runs as `tea.Cmd`s (`commands.go`, `narrate.go`). Bubble Tea ticks cannot be cancelled, so commands carry a generation counter (`loopGen`, `narrateGen`, `animGen`, `scrollGen`) and stale ticks are tagged and dropped.
 

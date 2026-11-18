@@ -364,11 +364,16 @@ var listSorts = []listSort{sortHot, sortNew, sortRising, sortTop}
 // JSON (pins + comment counts) and falls back to RSS when JSON is blocked.
 func fetchThreads(subreddit string, sort listSort) (threadsResult, error) {
 	sub := cleanSubreddit(subreddit)
-	if page, err := fetchThreadsJSON(sub, sort, ""); err == nil && len(page.threads) > 0 {
+	page, jerr := fetchThreadsJSON(sub, sort, "")
+	if jerr == nil && len(page.threads) > 0 {
 		return page, nil
 	}
 	page, err := fetchThreadsRSS(sub, sort, "")
 	if errors.Is(err, errNotFound) {
+		// Reddit 404s RSS when it's really blocking; trust a non-404 JSON error
+		if jerr != nil && !errors.Is(jerr, errNotFound) {
+			return threadsResult{}, jerr
+		}
 		return threadsResult{}, fmt.Errorf("no subreddit called r/%s", sub)
 	}
 	return page, err
@@ -378,16 +383,21 @@ func fetchThreads(subreddit string, sort listSort) (threadsResult, error) {
 // "after" cursor, falling back to RSS (which also honors it) when JSON is blocked.
 func fetchThreadsPage(subreddit string, sort listSort, after string) (threadsResult, error) {
 	sub := cleanSubreddit(subreddit)
-	if page, err := fetchThreadsJSON(sub, sort, after); err == nil {
+	page, jerr := fetchThreadsJSON(sub, sort, after)
+	if jerr == nil {
 		return page, nil
 	}
-	return fetchThreadsRSS(sub, sort, after)
+	page, err := fetchThreadsRSS(sub, sort, after)
+	if errors.Is(err, errNotFound) && !errors.Is(jerr, errNotFound) {
+		return threadsResult{}, jerr
+	}
+	return page, err
 }
 
 // threadsJSONURL builds a subreddit listing endpoint for the given sort. "top"
 // needs a time window; we default to the day so it tracks what's big right now.
 func threadsJSONURL(sub string, sort listSort, after string) string {
-	u := "https://www.reddit.com/r/" + sub + "/" + string(sort) + ".json?limit=100&raw_json=1"
+	u := apiHost + "/r/" + sub + "/" + string(sort) + ".json?limit=100&raw_json=1"
 	if sort == sortTop {
 		u += "&t=day"
 	}
@@ -620,6 +630,8 @@ func isEmojiCluster(runes []rune) bool {
 
 const commentFetchLimit = 100
 
+const apiHost = "https://oauth.reddit.com" // www 403s JSON; oauth accepts the browser cookie
+
 // jsonURL builds the .json endpoint for a thread. sort=new returns the freshest
 // comments first; limit caps each fetch so huge threads stay cheap.
 func jsonURL(raw string) string {
@@ -631,7 +643,7 @@ func jsonURL(raw string) string {
 	path = strings.TrimSuffix(path, ".json")
 	path = strings.TrimSuffix(path, ".rss")
 	path = strings.TrimSuffix(path, "/")
-	return fmt.Sprintf("https://www.reddit.com%s.json?sort=new&limit=%d&raw_json=1", path, commentFetchLimit)
+	return fmt.Sprintf(apiHost+"%s.json?sort=new&limit=%d&raw_json=1", path, commentFetchLimit)
 }
 
 // fetchUsernameFor returns the reddit username for a given Cookie header (via
@@ -689,11 +701,16 @@ type threadComments struct {
 // parent_id for threading, plus the OP submission) and falling back to RSS when
 // JSON is blocked. The post is nil on the RSS path (RSS carries no OP body).
 func fetchComments(threadRef string) (threadComments, error) {
-	if tc, err := fetchCommentsJSON(threadRef); err == nil {
+	tc, jerr := fetchCommentsJSON(threadRef)
+	if jerr == nil {
 		return tc, nil
 	}
 	cs, err := fetchCommentsRSS(threadRef)
 	if errors.Is(err, errNotFound) {
+		// Reddit 404s RSS when it's really blocking; trust a non-404 JSON error
+		if !errors.Is(jerr, errNotFound) {
+			return threadComments{}, jerr
+		}
 		return threadComments{}, fmt.Errorf("that thread isn't on reddit anymore (it may have been deleted)")
 	}
 	return threadComments{comments: cs}, err
@@ -729,7 +746,7 @@ func fetchMoreComments(postID string, moreIDs []string) (comments []comment, rem
 		"sort":     {"new"},
 		"api_type": {"json"},
 	}
-	body, err := postForm("https://www.reddit.com/api/morechildren.json", form)
+	body, err := postForm(apiHost+"/api/morechildren.json", form)
 	if err != nil {
 		return nil, moreIDs, nil, nil, err
 	}
